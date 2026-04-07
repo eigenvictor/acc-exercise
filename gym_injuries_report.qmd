@@ -1,0 +1,418 @@
+---
+title: "Gym Injuries"
+format:
+  html:
+    embed-resources: true
+warning: false
+message: false
+echo: false
+---
+
+## Analysis of suitability of data
+
+An intervention has been proposed to offer a free Personal Training (PT) session aimed at teaching gym users to use the gym equipment safely. This analysis explores whether the currently available ACC data is suitable for informing such an intervention.
+
+## Overview
+
+While we are unable to determine which individuals would most benefit from PT sessions, we can quite effectively identify which individuals have the greatest risk of future gym injuries. We should prioritise collection further relevant data to help us identify which injuries can best be prevented via the use of PT sessions, and which injuries are a higher priority to prevent. This will help us better target this intervention. In the meantime, we can use risk of future injury to help target any interventions we deploy.
+
+## Introduction
+
+The proposed intervention is based on [a study](https://www.sciencedirect.com/science/article/pii/S240584402400656X) that found exposure to PT reduced incidence of gym-related injuries. However the intervention in the study appears to involve *all* gym sessions being PT sessions. Whereas we're proposing one introductory session on how to use gym equipment safely, which actually seems more inline with what happened with the control group in the study. As such we can't necessarily assume that use of PT will significantly reduce incidence of gym injuries.
+
+The data available for analysis has several key variables missing. For example, we don't have any information on severity of injuries, how frequently individuals attend the gym, what kinds of exercises they perform, and if they've had PT before. Other useful variables would include how frequently they receive PT, gender, sex at birth, and how frequently they lodge ACC claims.
+
+Another point of consideration is the cost incurred by injuries. Although there is a mandate to reduce the severity and incidence of injuries in general, a focus on the most expensive injuries should be prioritised. This is because it will lead to cost savings for the organisation, freeing up more funds to invest in further injury prevention interventions. As such, data on the cost incurred by injuries would be valuable to improve the efficiency of the proposed intervention.
+
+While the information mentioned above is essential to ensure the intervention can be deployed efficiently, we may be requested to deploy the intervention anyway. To prepare for such a scenario, we explore the best we can do under certain assumptions. E.g. instead of modelling who will most benefit from the intervention, we model who is most at risk of receiving future gym injuries. This gives the programme manager a back-up option if they're really keen to get something across the line ASAP. However we would advise against this, as there would be no guarantee of efficacy, and may not even lead to useful resulting data for further analysis.
+
+## Other considerations
+
+Some individuals experience multiple injuries, it be a further consideration on how we want to factor this into our analysis. For example, is it as beneficial to have an individual go from receiving one injury to receiving zero, as it would to have an individual going from receiving nine injuries to receiving eight?
+
+Is explainability important for our model? We could build a well-tuned model that has high performance but has no intuitive rules for applying it. On the other hand, we could identify some key high level population groups to target. While this may not lead to the most efficient assignment of the intervention, it could help with explaining and rolling out the intervention, and ensuring that we adhere to the Algorithm Data Charter.
+
+While we note that we have insufficient data to deploy this intervention effectively, we could use our budget of 500 PT sessions to run a data collection exercise. We can randomly assign 500 individuals to a PT session and see if they have reduced injury outcomes in comparison to a control group. In order to simultaneously maximise our expected reduction in injuries, we could oversample individuals we identify as being at high risk of injury for the PT sessions.
+
+```{r setup}
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(randomForest)
+
+knitr::opts_chunk$set(echo = F)
+
+injury_data <- fread("data/DataForExercise.csv") %>% 
+  rename(
+    deprivation_decile = Areaunit_score,
+    age = age_at_extraction_date,
+    eth = ethnicity_last_claim,
+    tla = location_tla_last_claim,
+    work_intensity = work_last_claim
+  ) %>% 
+  mutate(
+    age_band = cut(age, breaks = seq(0, 100, by = 5), right = F),
+    injured = (toupper(y) == 'Y')*1,
+    work_intensity = factor(
+      work_intensity,
+      levels = c("Sedentary Work", "Light Work", "Medium Work",
+                 "Heavy Work", "Very Heavy Work", "Not Stated")
+    ),
+    accident_june_year = as.numeric(substring(acci_year, 1, 4)) + 1
+  )
+
+summarise_injuries_by <- function(.data, ...) {
+  vars <- enquos(...)
+  
+  .data %>% 
+    summarise(
+      inj_pct = mean(injured),
+      n = n(),
+      .by = c(!!!vars)
+    ) %>% 
+    arrange(pick(!!!vars))
+}
+```
+
+## Exploration of data
+
+### Outcome of interest
+
+```{r total_injuries}
+total_obs = comma(nrow(injury_data))
+injured_pct = injury_data %>% 
+  summarise(
+    pct = mean(injured)
+  ) %>% 
+  pull(pct) %>% 
+  percent(accuracy = 0.1)
+```
+
+We're interested to understand which individuals are at highest rate of experience an injury in the year following their data's extraction date. Within our complete dataset, we have `r total_obs` observations, `r injured_pct` of which experienced an injury in the year following their extraction date. This means our population of interest are quite a minority in our data, indicating a possible class imbalance issue.
+
+Although something to consider: while it is wasteful to offer a PT session to someone who will not benefit from it, it's not overly harmful if we miss a good candidate - as long as the 500 candidates we choose are suitable. As such, we should aim to minimise the false positive rate and not worry too much about the false negative rate or overall accuracy. With this as our goal, resolving class imbalances is less of a priority.
+
+### Numeric variables
+
+First we will check some high-level summaries of the numeric variables
+
+```{r numeric_summary}
+#| echo: false
+injury_data %>% 
+  select(where(is.numeric)) %>% 
+  summary()
+```
+
+Some things of note:
+
+-   age has one NA and some negative values
+
+-   deprivation has 4,561 NAs
+
+-   Someone's had 69 soft tissue injuries! And they're only 27 years old!
+
+This could point to outliers/erroneous values, and missingness which will need to be imputed. We could set anomolous values to NA, then impute all NA values.
+
+Proposed imputation method: find a set of N (e.g. 5) nearest neighbours based on similarity in other non-missing attributes, then take mean values of those neighbours as imputed value. We will need to confirm imputation method is unbiased.
+
+Next we will explore correlations between numeric variables.
+
+```{r correlations}
+correlations <- injury_data %>% 
+  select(injured, where(is.numeric), -PersonACCId) %>% 
+  filter(!is.na(age), !is.na(deprivation_decile), !is.na(arm_sprain_all)) %>% 
+  cor() %>% 
+  as.data.frame() %>% 
+  mutate(var1 = rownames(.)) %>% 
+  arrange(injured) %>% 
+  pivot_longer(
+    cols = -"var1",
+    names_to = "var2",
+    values_to = "cor"
+  )
+
+ggplot(data = correlations)+
+  geom_tile(aes(x=var1, y=var2, fill=cor))+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Correlations between numeric covariates")
+```
+
+It appears there are no silver bullets for correlation with outcome variable "injured". And we do see some examples of colinearity to be cautious of:
+
+-   shoulder vs rotator_sprain
+-   num_wgt vs num_gym
+-   neck_sprain vs neck
+-   hipthigh_sprain vs high_leg_thigh
+-   lower_back vs back_sprain
+-   soft_tissue seems to have high correlations with many variables
+-   In general there are strong correlations between the majority of injury variables
+
+The correlations between age and the counts of historic injuries are quite low. This is surprising, as one would expect that as you age, your cumulative total of past injuries would increase.
+
+It's surprising to see that shoulder_sprain and shoulder aren't strongly correlated, when most sprains seem to correlate strongly with total injuries in the corresponding body part.
+
+The most strongly correlated variables with our outcome of interest are:
+
+```{r top_correlations}
+top_cors <- correlations %>% 
+  filter(var1 == "injured", var2 != "injured") %>% 
+  mutate(
+    abs_cor = abs(cor)
+  ) %>% 
+  arrange(desc(abs_cor)) %>% 
+  head(10) %>% 
+  select(
+    var = var2,
+    cor
+  )
+
+top_cors
+```
+Digging in to some of the unusual observations, we find there is indeed something strange happening with shoulder injury counts. Some people have more shoulder sprains than shoulder injuries - there's a potential risk of erroneous value, or perhaps some column labels have been swapped.
+
+```{r plot_shoulder_injuries}
+ggplot(injury_data) +
+  geom_jitter(
+    aes(x=shoulder_sprain_all, y=shoulder_all), alpha = 0.3
+  ) +
+  ggtitle("Anomoly: some individuals have more shoulder sprains than total shoulder injuries")
+```
+
+We also observed an unexpected relationship between age and injury counts.
+
+```{r plot_injuries_by_age}
+injuries_by_age <- injury_data %>% 
+  select(age, ends_with("_all")) %>% 
+  #remove sprains for simplicity of viewing
+  select(!contains("sprain")) %>% 
+  #remove anomalous age values
+  filter(age >= 14) %>% 
+  pivot_longer(
+    cols = ends_with("_all"),
+    names_to = "injury",
+    values_to = "count",
+    values_drop_na = T
+  )
+
+ggplot(injuries_by_age) +
+  geom_point(
+    aes(x=age, y=count, col=injury),
+    alpha = 0.5
+  )
+```
+
+There are a lot of high injury counts for younger individuals, and they largely seem to be soft tissue injuries. Do we count the same injury multiple times if it affects multiple soft tissues? Do we have worse record keeping for older individuals?
+
+### Categorical variables
+
+Now we explore injury rates by categorical variables. Note that we will also explore relationships between injury outcomes and binned numeric variables, as there is a risk of non-linearity that will obscure interactions between injury outcomes and numeric variables.
+
+```{r plot_age_injuries}
+age_injuries <- injury_data %>% 
+  summarise_injuries_by(age_band)
+
+ggplot(age_injuries) +
+  geom_col(aes(x=age_band, y=inj_pct)) +
+  scale_y_continuous(labels = percent_format()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Injury rates by age")
+```
+
+We do indeed see a non-linear relationship between injury rates and age, which peaks in 20-24 age group. There do seem to be some unusual data points showing up here, though.
+
+```{r plot_age_obs}
+ggplot(age_injuries) +
+  geom_col(aes(x=age_band, y=n)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Number of observations")
+```
+
+There is a surprisingly large number of 0-5 year olds. Either there are some very muscly babies out there, or there are deeper issues with age data that will need to get resolved. The youngest age I have found gyms in NZ allow is 14 years old. Perhaps we set all values below this to NA, and impute them. It would also be interesting to understand how age is derived - is there some systemic issue that could lead to more age values being incorrect?
+
+```{r plot_dep_injuries}
+dep_injuries <- injury_data %>% 
+  summarise_injuries_by(deprivation_decile) %>% 
+  mutate(deprivation_decile = str_pad(deprivation_decile, width = 2, pad = "0"))
+
+ggplot(dep_injuries) +
+  geom_col(aes(x=deprivation_decile, y=inj_pct)) +
+  scale_y_continuous(labels = percent_format()) +
+  ggtitle("Injury rates by deprivation decile", "01 = most deprived, 10 = least deprived")
+```
+
+We observe that injury rates decrease as dep decile increases, however it's not completely linear. Injury rates slightly increase in the 8-9 area.
+
+```{r plot_eth_injuries}
+eth_injuries <- injury_data %>% 
+  summarise_injuries_by(eth) %>% 
+  arrange(desc(inj_pct))
+
+ggplot(eth_injuries) +
+  geom_col(aes(x=eth, y=inj_pct)) +
+  scale_y_continuous(labels = percent_format()) +
+  ggtitle("Injury rates by ethnicity")
+```
+
+There seems to be a weak interaction between ethnicity and injury outcomes.
+
+```{r plot_tla_injuries}
+tla_injuries <- injury_data %>% 
+  summarise_injuries_by(tla) %>% 
+  arrange(desc(inj_pct))
+
+ggplot(tla_injuries) +
+  geom_col(aes(x=tla, y=inj_pct)) +
+  scale_y_continuous(labels = percent_format()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Injury rates by Territorial Authority")
+```
+
+We do see some large differences by Territorial Authority. Although surprisingly few TLAs are featured, NZ has 67 in total. Do most of these not have gyms, or do we only count the top 9 and put the rest into Unknown as a residual category? Otherwise this could suggest that we're missing areas from the training data.
+
+```{r plot_job_injuries}
+intensity_of_job_injuries <- injury_data %>% 
+  summarise_injuries_by(work_intensity)
+
+ggplot(intensity_of_job_injuries) +
+  geom_col(aes(x=work_intensity, y=inj_pct)) +
+  scale_y_continuous(labels = percent_format()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Injury rates by Intensity of Work")
+```
+
+Intensity of Work is an ordinal variable, ranging from sedentary to very heavy work. However injury rates don't follow a monotone relationship, with light work individuals having the highest injury rate. Therefore it may not be beneficial to treat it as ordinal in our modelling. We will need to impute the NAs, should we impute Not Stated as well? There could be a meaningful difference between Not Stated and NAs, e.g. it could include individuals who are not currently working. I would recommend leaving it as is, and only imputing the NAs.
+
+```{r plot_recent_claim_injuries}
+year_injuries <- injury_data %>% 
+  summarise_injuries_by(accident_june_year)
+
+year_range <- min(year_injuries$accident_june_year):max(year_injuries$accident_june_year)
+
+ggplot(year_injuries) +
+  geom_col(aes(x=accident_june_year, y=inj_pct)) +
+  scale_x_continuous(breaks = year_range) +
+  scale_y_continuous(labels = percent_format()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("Injury rates by year of last ACC claim")
+```
+
+Injury rates increase with respect to how recent the last ACC claim was. This makes some sense, the longer one goes without making ACC claims, the less prone they are to getting injured. Having a recent claim might indicate a high frequency of claims, so will be a good predictor of making future claims.
+
+## Model construction
+
+We aim to build a model to inform which individuals are best suited for receiving the free Personal Training (PT) session. This task will have to rely on some certain assumptions, where we don't have adequate data to inform the modelling:
+
+-   We do not know if the individuals reporting injuries in this data have already had PT sessions. Those that have already had them may benefit less from them.
+-   We don't have data to inform which demographics receive the most benefit from PT sessions
+
+As such we have to assume that the current uptake rates of PT services and the benefits received from PT services are independent of all variables we consider.
+
+Our analysis above indicates high rates of non-linearity between covariates and our desired outcome variable. While a binomial distribution is a tempting choice for the model fit, it will be challenging to get it to work with the non-linearity and interaction effects of our covariates. We could resolve these by using principal components for correlated variables, but in the first instance it will be easier to try a random forest.
+
+Note that for now we will exclude all observations with NA or erroneous values. For future iterations, we can look to resolve priority variables with imputation.
+
+```{r train_model}
+
+model_all_data <- injury_data %>% 
+  mutate(
+    y = as.factor(y)
+  ) %>% 
+  select(
+    y, age, eth, tla,
+    work_intensity, deprivation_decile, accident_june_year,
+    ends_with("_all")
+  ) %>% 
+  #sprains have high correlation with injuries for same body part
+  # remove this to reduce issues from multi-colinearity and to help
+  # measure variable importances
+  select(-contains("sprain")) %>% 
+  #Would rather resolve missing/erroneous values, but in the interest of time
+  # (this is just a training exercise after all), I will just drop them.
+  drop_na() %>% 
+  filter(age >= 14) 
+
+sample_size = round(nrow(model_all_data) * 0.6)
+
+set.seed(665)
+samp <- sample(1:nrow(model_all_data), size = sample_size, replace = F)
+
+x <- model_all_data %>% 
+  select(-y)
+
+y = model_all_data %>% 
+  pull(y)
+
+x_train <- x[samp,]
+y_train <- y[samp]
+
+x_test <- x[-samp,]
+y_test <- y[-samp]
+
+weights <- as.data.frame(table(y_train)) %>% 
+  mutate(
+    weight = Freq / sum(Freq),
+    .keep = "unused"
+  ) %>% 
+  pivot_wider(
+    names_from = y_train,
+    values_from = weight,
+  )
+
+injury_rf <- randomForest(
+  x_train, y_train,
+  xtest = x_test, ytest = y_test,
+  classwt = c('Y' = 1, 'N' = weights$N),
+  importance = T,
+  ntree=100,
+  keep.forest = T
+)
+
+injury_rf
+injury_importance <- as.data.frame(importance(injury_rf))
+confusion_matrix <- as.data.frame(injury_rf$test$confusion)
+
+confusion_matrix$actual <- rownames(confusion_matrix)
+false_positive_rate <- confusion_matrix %>% 
+  filter(actual == "Y") %>% 
+  pull(class.error) %>% 
+  percent(accuracy = 0.1)
+
+cat("Most important variables:")
+injury_importance %>% 
+  arrange(desc(Y)) %>% 
+  head(10)
+```
+
+We find that the model has a false positive rate of `r false_positive_rate`. Not bad for a first try! There is likely room for improvement by considering other models or changing the random forest parameters, but let's go with this for now.
+
+We have also found the most important variables in identify a future injury outcome - things like the count of previous gym injuries, the recency of the last ACC claim, soft tissue injury counts, count of weight-lighting injuries, and age. Many of these are as we expected. Some things have lower significance than expected, like work_intensity. This might correlate with other significant variables, which reduces its explanatory power.
+
+```{r predict_model}
+injury_prob <- as.data.frame(predict(injury_rf, newdata = x, type="prob"))
+
+injury_prediction <- x %>% 
+  mutate(
+    predict_injury_prob = injury_prob$Y,
+    injured_actual = y
+  )
+
+top_500_pred <- injury_prediction %>% 
+  arrange(desc(predict_injury_prob)) %>% 
+  head(500)
+
+actual_injured <- top_500_pred %>%
+  count(injured_actual) %>% 
+  filter(injured_actual == 'Y') %>% 
+  pull(n)
+```
+
+Based on this, we can extract our 500 individuals with the highest expected probability of injury in the following year. Of these, `r actual_injured` did indeed go on to receive future injuries. That's pretty good model performance! Almost suspiciously good... perhaps I need a Senior Data Scientist to review my work to make sure I'm not overfitting!
+
+## Next steps
+To improve performance, we could explore alternative models, or fine-tune the model parameters of the random forest. We are currently dropping `r percent(1 - nrow(x)/nrow(injury_data)` of observations due to data issues, use of imputation could improve this. Although most of these are being dropped due to suspicious age values (<14), so ensuring age is being calculated correctly should be a priority. We are also dropping observations due to missing deprivation, but this is not an important variable in the model. We could instead remove this variable from our training data, and retain those ~4,000 observations.
