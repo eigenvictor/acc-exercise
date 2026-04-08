@@ -14,13 +14,13 @@ An intervention has been proposed to offer a free Personal Training (PT) session
 
 ## Overview
 
-While we are unable to determine which individuals would most benefit from PT sessions, we can quite effectively identify which individuals have the greatest risk of future gym injuries. We should prioritise collection further relevant data to help us identify which injuries can best be prevented via the use of PT sessions, and which injuries are a higher priority to prevent. This will help us better target this intervention. In the meantime, we can use risk of future injury to help target any interventions we deploy.
+While we are unable to determine which individuals would most benefit from PT sessions, we can quite effectively identify which individuals have the greatest risk of future gym injuries. We should prioritise collection of further relevant data to help us identify which injuries can best be prevented via the use of PT sessions, and which injuries are a higher priority to prevent. This will help us better target this intervention. In the meantime, we can use risk of future injury to help target any interventions we deploy.
 
 ## Introduction
 
 ### Problem statement
 
-The proposed intervention is based on [a study](https://www.sciencedirect.com/science/article/pii/S240584402400656X) that found exposure to PT reduced incidence of gym-related injuries. However the intervention in the study appears to involve *all* gym sessions being PT sessions. Whereas we're proposing one introductory session on how to use gym equipment safely, which actually seems more inline with what happened with the control group in the study. As such we can't necessarily assume that use of PT will significantly reduce incidence of gym injuries.
+The proposed intervention is based on [a study](https://www.sciencedirect.com/science/article/pii/S240584402400656X) that found exposure to PT reduced incidence of gym-related injuries. However the intervention in the study appears to involve *all* gym sessions being PT sessions. The study also only focuses on a very narrow demographic group - healthy, young male adults. Whereas we're proposing one introductory session on how to use gym equipment safely, which seems more inline with what happened with the control group in the study. We're also looking to offer this over a range of age groups, sexes, and levels of health and ability. As such we can't necessarily assume that use of PT will significantly reduce incidence of gym injuries.
 
 ### Key issues
 
@@ -34,11 +34,11 @@ While the information mentioned above is essential to ensure the intervention ca
 
 ### Other considerations
 
-Some individuals experience multiple injuries, it be a further consideration on how we want to factor this into our analysis. For example, is it as beneficial to have an individual go from receiving one injury to receiving zero, as it would to have an individual going from receiving nine injuries to receiving eight?
+Some individuals experience multiple injuries, we should consider how we want to factor this into our analysis. For example, is it as beneficial to have an individual go from receiving one injury to receiving zero, as it would to have an individual going from receiving nine injuries to receiving eight?
 
 Is explainability important for our model? We could build a well-tuned model that has high performance but has no intuitive rules for applying it. On the other hand, we could identify some key high level population groups to target. While this may not lead to the most efficient assignment of the intervention, it could help with explaining and rolling out the intervention, and ensuring that we adhere to the Algorithm Data Charter.
 
-While we note that we have insufficient data to deploy this intervention effectively, we could use our budget of 500 PT sessions to run a data collection exercise. We can randomly assign 500 individuals to a PT session and see if they have reduced injury outcomes in comparison to a control group. In order to simultaneously maximise our expected reduction in injuries, we could oversample individuals we identify as being at high risk of injury for the PT sessions.
+While we note that we have insufficient data to deploy this intervention effectively, we could use our budget of 500 PT sessions to run a data collection exercise. We can randomly assign 500 individuals to a PT session and see if they have reduced injury outcomes in comparison to a control group. In order to simultaneously maximise our expected reduction in injuries, we could oversample individuals we identify as being at high risk of injury for receiving the PT sessions. This approach would also assist in evaluating the efficacy of our intervention.
 
 ```{r setup}
 
@@ -100,12 +100,13 @@ injured_pct = injury_data %>%
   percent(accuracy = 0.1)
 ```
 
-We're interested to understand which individuals are at highest rate of experience an injury in the year following their data's extraction date. Within our complete dataset, we have `r total_obs` observations, `r injured_pct` of which experienced an injury in the year following their extraction date. This means our population of interest are quite a minority in our data, which could lead to class imbalance issues.
+We're interested to understand which individuals have the greatest chance of experiencing an injury in the year following their data's extraction date. Within our complete dataset, we have `r total_obs` observations, `r injured_pct` of which experienced an injury in the year following their extraction date. This means our population of interest are quite a minority in our data, which could lead to class imbalance issues.
 
-Although something to consider: while it is wasteful to offer a PT session to someone who will not benefit from it, it's not overly harmful if we miss a good candidate - as long as the 500 candidates we choose are suitable. As such, we should aim to minimise the false positive rate and not worry too much about the false negative rate or overall accuracy. With this as our goal, resolving class imbalances is less of a priority.
+Although something to consider: while it would be inefficient to offer a PT session to someone who will not benefit from it, there's no efficiency loss if we miss a good candidate. The main outcome we desire is that the 500 candidates we choose are suitable. As such, we should aim to minimise the false positive rate and not worry too much about the false negative rate, or overall accuracy. With this as our goal, resolving class imbalances is less of a priority.
 
 ### Numeric variables
 
+#### High level summary
 First we will check some high-level summaries of the numeric variables
 
 ```{r numeric_summary}
@@ -136,7 +137,7 @@ It appears as though we have some outliers/erroneous values, and we have missing
 
 With arm_sprain_all it is possible that the NAs should be zero, but examining the data, 0 is already the modal value - and the max value is 1. It seems more likely that the values greater than 1 have somehow been dropped. It will be challenging to reliably impute this, so unless we can resource this data, we might be better placed to just drop it.
 
-Next we will explore correlations between numeric variables.
+#### Correlations
 
 ```{r correlations}
 correlations <- injury_data %>% 
@@ -192,7 +193,7 @@ top_cors <- correlations %>%
 top_cors
 ```
 
-Digging in to some of the unusual observations, we find there is indeed something strange happening with shoulder injury counts. Some people have more shoulder sprains than shoulder injuries - there's a potential risk of erroneous value, or perhaps some column labels have been swapped.
+Digging in to some of the unusual observations, we find there is indeed something strange happening with shoulder injury counts. Some people have more shoulder sprains than shoulder injuries - there's a potential risk of erroneous values, or perhaps some column labels have been swapped.
 
 ```{r plot_shoulder_injuries}
 ggplot(injury_data) +
@@ -330,7 +331,7 @@ Injury rates increase with respect to how recent the last ACC claim was. This ma
 We aim to build a model to inform which individuals are best suited for receiving the free Personal Training (PT) session. This task will have to rely on some certain assumptions, where we don't have adequate data to inform the modelling:
 
 -   We do not know if the individuals reporting injuries in this data have already had PT sessions. Those that have already had them may benefit less from them.
--   We don't have data to inform which demographics receive the most benefit from PT sessions
+-   We don't have data to inform which demographics receive the most benefit from PT sessions.
 
 As such we have to assume that the current uptake rates of PT services and the benefits received from PT services are independent of all variables we consider.
 
@@ -413,7 +414,7 @@ injury_importance %>%
 
 We find that the model has a false positive rate of `r false_positive_rate`. Not bad for a first try! There is likely room for improvement by considering other models or changing the random forest parameters, but let's go with this for now.
 
-We have also found the most important variables in identify a future injury outcome - things like the count of previous gym injuries, the recency of the last ACC claim, soft tissue injury counts, count of weight-lighting injuries, and age. Many of these are as we expected. Some things have lower significance than expected, like work_intensity. This might correlate with other significant variables, which reduces its explanatory power.
+We have also found the most important variables in identify a future injury outcome - things like the count of previous gym injuries, the recency of the last ACC claim, soft tissue injury counts, count of weight-lifting injuries, and age. Many of these are as we expected. Some things have lower significance than expected, like work_intensity. This might correlate with other significant variables, which reduces its explanatory power.
 
 ```{r predict_model}
 injury_prob <- as.data.frame(predict(injury_rf, newdata = x, type="prob"))
